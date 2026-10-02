@@ -7,8 +7,6 @@ import (
 	"skillswap/domain"
 )
 
-
-
 type failingReader struct{}
 
 func (f *failingReader) GetOffer(offerID string) (domain.Offer, error) {
@@ -18,7 +16,6 @@ func (f *failingReader) GetOffer(offerID string) (domain.Offer, error) {
 func (f *failingReader) GetResponsesByUser(userID string) ([]domain.Response, error) {
 	return nil, domain.ErrStorageUnavailable
 }
-
 
 type fakeReader struct {
 	offer     domain.Offer
@@ -36,8 +33,6 @@ func (f *fakeReader) GetResponsesByUser(userID string) ([]domain.Response, error
 	return f.responses, nil
 }
 
-
-
 func TestCheckCanRespond_Allowed(t *testing.T) {
 	offer := domain.Offer{ID: "offer-1", AuthorID: "author-1", Status: domain.OfferActive}
 	svc := NewService(&fakeReader{offer: offer})
@@ -51,8 +46,6 @@ func TestCheckCanRespond_Allowed(t *testing.T) {
 		t.Errorf("expected true, got false")
 	}
 }
-
-
 
 func TestCheckCanRespond_OfferNotActive(t *testing.T) {
 	offer := domain.Offer{ID: "offer-1", AuthorID: "author-1", Status: domain.OfferClosed}
@@ -97,7 +90,6 @@ func TestCheckCanRespond_AlreadyResponded(t *testing.T) {
 	}
 }
 
-
 func TestCheckCanRespond_StorageUnavailable(t *testing.T) {
 	svc := NewService(&failingReader{})
 
@@ -107,9 +99,6 @@ func TestCheckCanRespond_StorageUnavailable(t *testing.T) {
 		t.Errorf("expected ErrStorageUnavailable, got %v", err)
 	}
 }
-
-
-
 
 func TestCanRespond_DoesNotMutateInput(t *testing.T) {
 	offer := domain.Offer{ID: "offer-1", AuthorID: "author-1", Status: domain.OfferActive}
