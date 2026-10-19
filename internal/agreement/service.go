@@ -33,6 +33,14 @@ func (s *Service) decide(actorID, responseID string, decision domain.ResponseSta
 	if err != nil {
 		return domain.Response{}, fmt.Errorf("get offer: %w", err)
 	}
+	if resp.Status == decision {
+		check := resp
+		check.Status = domain.ResponsePending
+		if _, err := Decide(actorID, offer, check, decision); err != nil {
+			return domain.Response{}, err
+		}
+		return resp, nil
+	}
 	updated, err := Decide(actorID, offer, resp, decision)
 	if err != nil {
 		return domain.Response{}, err
