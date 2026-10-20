@@ -71,8 +71,9 @@ func TestService_Reject(t *testing.T) {
 
 func TestService_Decide_Errors(t *testing.T) {
 	tests := []struct {
-		name    string
-		store   *storeStub
+		name  string
+		store *storeStub
+
 		actorID string
 		wantErr error
 	}{
@@ -198,5 +199,50 @@ func TestService_SetOfferStatus_Errors(t *testing.T) {
 				t.Fatalf("nothing should be saved, got %v", tt.store.savedOffers)
 			}
 		})
+	}
+}
+
+func TestService_Accept_Repeat_NoSave(t *testing.T) {
+	store := &storeStub{offer: offer(domain.OfferActive), resp: response(domain.ResponseAccepted)}
+
+	got, err := NewService(store).Accept("author", "r1")
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Status != domain.ResponseAccepted {
+		t.Fatalf("status: got %s, want accepted", got.Status)
+	}
+	if len(store.savedResponses) != 0 {
+		t.Fatalf("repeat must not save, got %v", store.savedResponses)
+	}
+}
+
+func TestService_Accept_Repeat_NotAuthor(t *testing.T) {
+	store := &storeStub{offer: offer(domain.OfferActive), resp: response(domain.ResponseAccepted)}
+
+	_, err := NewService(store).Accept("u2", "r1")
+
+	if !errors.Is(err, ErrNotOfferAuthor) {
+		t.Fatalf("want ErrNotOfferAuthor, got %v", err)
+	}
+	if len(store.savedResponses) != 0 {
+		t.Fatalf("nothing should be saved, got %v", store.savedResponses)
+	}
+}
+
+func TestService_Reject_AfterAccepted(t *testing.T) {
+	store := &storeStub{offer: offer(domain.OfferActive), resp: response(domain.ResponseAccepted)}
+
+	got, err := NewService(store).Reject("author", "r1")
+
+	if !errors.Is(err, domain.ErrInvalidTransition) {
+		t.Fatalf("want ErrInvalidTransition, got %v", err)
+	}
+	if got != (domain.Response{}) {
+		t.Fatalf("on error result must be zero, got %+v", got)
+	}
+	if len(store.savedResponses) != 0 {
+		t.Fatalf("nothing should be saved, got %v", store.savedResponses)
 	}
 }

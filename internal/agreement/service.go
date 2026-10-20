@@ -27,23 +27,28 @@ func (s *Service) decide(actorID, responseID string, decision domain.ResponseSta
 	if err != nil {
 		return domain.Response{}, fmt.Errorf("get response: %w", err)
 	}
-	if resp.Status == decision {
-		return resp, nil
-	}
+
 	offer, err := s.store.GetOffer(resp.OfferID)
 	if err != nil {
 		return domain.Response{}, fmt.Errorf("get offer: %w", err)
+	}
+	if resp.Status == decision {
+		check := resp
+		check.Status = domain.ResponsePending
+		if _, err := Decide(actorID, offer, check, decision); err != nil {
+			return domain.Response{}, err
+		}
+		return resp, nil
 	}
 	updated, err := Decide(actorID, offer, resp, decision)
 	if err != nil {
 		return domain.Response{}, err
 	}
-	if updated == resp {
-		return updated, nil
-	}
+
 	if err := s.store.SaveResponse(updated); err != nil {
 		return domain.Response{}, fmt.Errorf("save response: %w", err)
 	}
+
 	return updated, nil
 }
 
