@@ -50,6 +50,8 @@ func TransitionResponse(cur, next domain.ResponseStatus) error {
 // Decide фиксирует решение автора предложения по отклику.
 // Возвращает изменённую копию отклика; входные значения не меняются.
 // Решать можно по активному или приостановленному предложению, но не по закрытому.
+// Повтор подтверждения accepted → accepted возвращает исходный отклик без изменений
+// после проверки принадлежности отклика, прав автора и состояния предложения.
 func Decide(actorID string, offer domain.Offer, resp domain.Response, decision domain.ResponseStatus) (domain.Response, error) {
 	if resp.OfferID != offer.ID {
 		return domain.Response{}, fmt.Errorf("response %s, offer %s: %w", resp.ID, offer.ID, ErrOfferMismatch)
@@ -57,8 +59,11 @@ func Decide(actorID string, offer domain.Offer, resp domain.Response, decision d
 	if offer.AuthorID != actorID {
 		return domain.Response{}, fmt.Errorf("decide on offer %s: %w", offer.ID, ErrNotOfferAuthor)
 	}
-	if offer.Status == domain.OfferClosed {
-		return domain.Response{}, fmt.Errorf("offer %s is closed: %w", offer.ID, domain.ErrInvalidTransition)
+	if offer.Status != domain.OfferActive && offer.Status != domain.OfferPaused {
+		return domain.Response{}, fmt.Errorf("offer %s has status %q: %w", offer.ID, offer.Status, domain.ErrInvalidTransition)
+	}
+	if resp.Status == domain.ResponseAccepted && decision == domain.ResponseAccepted {
+		return resp, nil
 	}
 	if err := TransitionResponse(resp.Status, decision); err != nil {
 		return domain.Response{}, err

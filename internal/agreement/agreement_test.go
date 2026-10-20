@@ -2,6 +2,7 @@ package agreement
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	"skillswap/domain"
@@ -96,14 +97,35 @@ func TestDecide(t *testing.T) {
 		{"already rejected", "author", offer(domain.OfferActive), response(domain.ResponseRejected), domain.ResponseAccepted, "", domain.ErrInvalidTransition},
 		{"decision is pending", "author", offer(domain.OfferActive), response(domain.ResponsePending), domain.ResponsePending, "", domain.ErrInvalidTransition},
 		{"other offer", "author", domain.Offer{ID: "o2", AuthorID: "author", Status: domain.OfferActive}, response(domain.ResponsePending), domain.ResponseAccepted, "", ErrOfferMismatch},
+		{"repeat accept", "author", offer(domain.OfferActive), response(domain.ResponseAccepted), domain.ResponseAccepted, domain.ResponseAccepted, nil},
+		{"repeat accept paused", "author", offer(domain.OfferPaused), response(domain.ResponseAccepted), domain.ResponseAccepted, domain.ResponseAccepted, nil},
+		{"repeat by stranger", "stranger", offer(domain.OfferActive), response(domain.ResponseAccepted), domain.ResponseAccepted, "", ErrNotOfferAuthor},
+		{"repeat by respondent", "u2", offer(domain.OfferActive), response(domain.ResponseAccepted), domain.ResponseAccepted, "", ErrNotOfferAuthor},
+		{"repeat on closed offer", "author", offer(domain.OfferClosed), response(domain.ResponseAccepted), domain.ResponseAccepted, "", domain.ErrInvalidTransition},
+		{"repeat for other offer", "author", domain.Offer{ID: "o2", AuthorID: "author", Status: domain.OfferActive}, response(domain.ResponseAccepted), domain.ResponseAccepted, "", ErrOfferMismatch},
+		{"repeat rejection remains forbidden", "author", offer(domain.OfferActive), response(domain.ResponseRejected), domain.ResponseRejected, "", domain.ErrInvalidTransition},
+		{"unknown offer status", "author", offer("deleted"), response(domain.ResponsePending), domain.ResponseAccepted, "", domain.ErrInvalidTransition},
+		{"repeat with unknown offer status", "author", offer("deleted"), response(domain.ResponseAccepted), domain.ResponseAccepted, "", domain.ErrInvalidTransition},
+		{"unknown response status", "author", offer(domain.OfferActive), response("unknown"), domain.ResponseAccepted, "", domain.ErrInvalidTransition},
+		{"unknown decision", "author", offer(domain.OfferActive), response(domain.ResponsePending), "unknown", "", domain.ErrInvalidTransition},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			tt.offer.WantsInReturn = []domain.Skill{{Name: "Go", Level: domain.LevelBeginner}}
+			beforeOffer := tt.offer
+			beforeOffer.WantsInReturn = append([]domain.Skill(nil), tt.offer.WantsInReturn...)
+			beforeResponse := tt.resp
 			got, err := Decide(tt.actorID, tt.offer, tt.resp, tt.decision)
+			if !reflect.DeepEqual(tt.offer, beforeOffer) || tt.resp != beforeResponse {
+				t.Fatal("Decide modified its input")
+			}
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("want %v, got %v", tt.wantErr, err)
+				}
+				if got != (domain.Response{}) {
+					t.Fatalf("on error result must be zero, got %+v", got)
 				}
 				return
 			}
@@ -115,6 +137,9 @@ func TestDecide(t *testing.T) {
 			}
 			if got.ID != tt.resp.ID || got.OfferID != tt.resp.OfferID || got.UserID != tt.resp.UserID {
 				t.Fatalf("only status may change: got %+v, input %+v", got, tt.resp)
+			}
+			if tt.resp.Status == tt.decision && got != tt.resp {
+				t.Fatalf("no-op changed response: got %+v, want %+v", got, tt.resp)
 			}
 		})
 	}
