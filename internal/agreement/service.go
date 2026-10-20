@@ -46,7 +46,6 @@ func (s *Service) decide(actorID, responseID string, decision domain.ResponseSta
 	return updated, nil
 }
 
-
 func (s *Service) SetOfferStatus(actorID, offerID string, next domain.OfferStatus) (domain.Offer, error) {
 	offer, err := s.store.GetOffer(offerID)
 	if err != nil {
