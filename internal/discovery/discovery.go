@@ -1,6 +1,10 @@
 package discovery
 
-import "skillswap/domain"
+import (
+	"fmt"
+
+	"skillswap/domain"
+)
 
 func IsRelevant(user domain.User, offer domain.Offer) bool {
 	if offer.Status != domain.OfferActive {
@@ -66,25 +70,60 @@ func formatCompatible(userFormat, offerFormat domain.Format) bool {
 		offerFormat == domain.FormatAny
 }
 
+// ExcludeConfirmed убирает предложения, по которым у пользователя уже
+// подтверждена договорённость (его отклик принят). Порядок сохраняется,
+// пустой результат — непустой (non-nil) срез, как у FindRelevant.
+func ExcludeConfirmed(offers []domain.Offer, userID string, responses []domain.Response) []domain.Offer {
+	confirmed := make(map[string]bool)
+	for _, resp := range responses {
+		if resp.UserID == userID && resp.Status == domain.ResponseAccepted {
+			confirmed[resp.OfferID] = true
+		}
+	}
+
+	result := make([]domain.Offer, 0, len(offers))
+	for _, offer := range offers {
+		if confirmed[offer.ID] {
+			continue
+		}
+		result = append(result, offer)
+	}
+
+	return result
+}
+
 type OfferReader interface {
 	GetOffers() ([]domain.Offer, error)
 }
 
-type Service struct {
-	reader OfferReader
+type ResponseReader interface {
+	GetResponsesByUser(userID string) ([]domain.Response, error)
 }
 
-func NewService(reader OfferReader) *Service {
+type Service struct {
+	reader    OfferReader
+	responses ResponseReader
+}
+
+func NewService(reader OfferReader, responses ResponseReader) *Service {
 	return &Service{
-		reader: reader,
+		reader:    reader,
+		responses: responses,
 	}
 }
 
+// FindRelevant возвращает релевантные предложения без тех, по которым
+// договорённость пользователя уже подтверждена.
 func (s *Service) FindRelevant(user domain.User) ([]domain.Offer, error) {
 	offers, err := s.reader.GetOffers()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get offers: %w", err)
 	}
 
-	return FindRelevant(user, offers), nil
+	responses, err := s.responses.GetResponsesByUser(user.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get responses: %w", err)
+	}
+
+	return ExcludeConfirmed(FindRelevant(user, offers), user.ID, responses), nil
 }
