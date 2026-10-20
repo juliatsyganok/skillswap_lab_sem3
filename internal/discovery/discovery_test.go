@@ -173,7 +173,7 @@ func TestFindRelevant(t *testing.T) {
 }
 
 func TestServiceFindRelevantStorageError(t *testing.T) {
-	svc := NewService(&fakeReader{err: domain.ErrStorageUnavailable})
+	svc := NewService(&fakeReader{err: domain.ErrStorageUnavailable}, &fakeResponses{})
 
 	_, err := svc.FindRelevant(domain.User{ID: "user-1"})
 
