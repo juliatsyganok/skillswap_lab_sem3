@@ -38,13 +38,15 @@ func (s *Service) decide(actorID, responseID string, decision domain.ResponseSta
 	if err != nil {
 		return domain.Response{}, err
 	}
+	if updated == resp {
+		return updated, nil
+	}
 	if err := s.store.SaveResponse(updated); err != nil {
 		return domain.Response{}, fmt.Errorf("save response: %w", err)
 	}
 	return updated, nil
 }
 
-// SetOfferStatus — автор переводит своё предложение в новый статус.
 func (s *Service) SetOfferStatus(actorID, offerID string, next domain.OfferStatus) (domain.Offer, error) {
 	offer, err := s.store.GetOffer(offerID)
 	if err != nil {

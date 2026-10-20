@@ -100,6 +100,12 @@ func TestService_Decide_Errors(t *testing.T) {
 			actorID: "u2",
 			wantErr: ErrNotOfferAuthor,
 		},
+		{
+			name:    "rule violated: already rejected",
+			store:   &storeStub{offer: offer(domain.OfferActive), resp: response(domain.ResponseRejected)},
+			actorID: "author",
+			wantErr: domain.ErrInvalidTransition,
+		},
 	}
 
 	for _, tt := range tests {
@@ -114,6 +120,25 @@ func TestService_Decide_Errors(t *testing.T) {
 				t.Fatalf("nothing should be saved, got %v", tt.store.savedResponses)
 			}
 		})
+	}
+}
+
+func TestService_Accept_NoOp(t *testing.T) {
+	store := &storeStub{
+		offer:   offer(domain.OfferActive),
+		resp:    response(domain.ResponseAccepted),
+		saveErr: domain.ErrStorageUnavailable,
+	}
+
+	got, err := NewService(store).Accept("author", "r1")
+	if err != nil {
+		t.Fatalf("repeat must not call Save: %v", err)
+	}
+	if got != store.resp {
+		t.Fatalf("repeat: got %+v, want %+v", got, store.resp)
+	}
+	if len(store.savedResponses) != 0 {
+		t.Fatalf("repeat saved responses: %v", store.savedResponses)
 	}
 }
 
