@@ -22,6 +22,11 @@ type ResponseReader interface {
 	GetResponsesByUser(userID string) ([]domain.Response, error)
 }
 
+type Repo interface {
+	Load(key string) (domain.Response, error)
+	Save(r domain.Response) error
+}
+
 type Service struct {
 	reader ResponseReader
 }
