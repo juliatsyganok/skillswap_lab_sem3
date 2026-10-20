@@ -14,12 +14,10 @@ func NewService(store Store) *Service {
 	return &Service{store: store}
 }
 
-// Accept — автор предложения принимает отклик.
 func (s *Service) Accept(actorID, responseID string) (domain.Response, error) {
 	return s.decide(actorID, responseID, domain.ResponseAccepted)
 }
 
-// Reject — автор предложения отклоняет отклик.
 func (s *Service) Reject(actorID, responseID string) (domain.Response, error) {
 	return s.decide(actorID, responseID, domain.ResponseRejected)
 }
@@ -28,6 +26,9 @@ func (s *Service) decide(actorID, responseID string, decision domain.ResponseSta
 	resp, err := s.store.GetResponse(responseID)
 	if err != nil {
 		return domain.Response{}, fmt.Errorf("get response: %w", err)
+	}
+	if resp.Status == decision {
+		return resp, nil
 	}
 	offer, err := s.store.GetOffer(resp.OfferID)
 	if err != nil {

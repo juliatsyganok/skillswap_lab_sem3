@@ -8,10 +8,8 @@ import (
 	"skillswap/internal/storage"
 )
 
-// In-memory хранилище должно подходить сервису без адаптеров.
 var _ Store = (*storage.InMemoryAgreementStore)(nil)
 
-// storeStub отдаёт заранее заданные значения/ошибки и запоминает, что сохраняли.
 type storeStub struct {
 	offer    domain.Offer
 	resp     domain.Response
