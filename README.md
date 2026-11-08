@@ -101,3 +101,23 @@ go test -race ./...
 Тесты остановки запускают настоящий HTTP-сервер и удерживают запрос
 до начала shutdown. В штатном случае ответ приходит с `204`. При
 превышении grace period соединение закрывается и контекст запроса отменяется.
+
+## ЛР3. Команда и состояние (A)
+
+Маршруты, DTO и таблица ошибок — в [api-contract.md](api-contract.md).
+
+| Маршрут | Use case | Прежнее правило / новая часть | Автор |
+| --- | --- | --- | --- |
+| `PUT /v1/engagements/{id}/acceptance` | `agreement.Engagements.Accept` → `Service.AcceptContext` | ЛР2 `Decide` (права автора, переход, no-op повтора); новое — вызов справочника до перехода, `changed` | A |
+| `GET /v1/engagements/{id}` | `agreement.Engagements.Get` | Новое: чтение общего store, доступ только участникам | A |
+
+```bash
+go run ./cmd/api
+./requests/engagements.sh
+go test -v ./internal/engagementapi ./cmd/api
+```
+
+Справочник предложений пока локальный (`agreement.LocalOfferDirectory`);
+HTTP-клиент C подключается в `registerEngagements` в `cmd/api/main.go`.
+В `httpapp.Dependencies.Responses` теперь требуется также `GetOffer`
+(тип `agreement.EngagementReader`).

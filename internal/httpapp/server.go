@@ -16,10 +16,8 @@ import (
 
 // Dependencies is the composition boundary for the team's route registration.
 type Dependencies struct {
-	Agreement *agreement.Service
-	Responses interface {
-		GetResponse(id string) (domain.Response, error)
-	}
+	Agreement  *agreement.Service
+	Responses  agreement.EngagementReader
 	Profiles   matching.ProfileReader
 	Matching   *matching.Service
 	Discovery  *discovery.Service

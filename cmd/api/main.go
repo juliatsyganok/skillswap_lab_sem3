@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"skillswap/internal/agreement"
+	"skillswap/internal/engagementapi"
 	"skillswap/internal/httpapp"
 )
 
@@ -25,7 +28,9 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	server, err := httpapp.NewServer(cfg, logger, nil)
+	server, err := httpapp.NewServer(cfg, logger, func(mux *http.ServeMux, deps httpapp.Dependencies) {
+		registerEngagements(mux, deps, logger)
+	})
 	if err != nil {
 		return err
 	}
@@ -44,4 +49,15 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("server stopped")
 	return nil
+}
+
+func registerEngagements(mux *http.ServeMux, deps httpapp.Dependencies, logger *slog.Logger) {
+	directory := agreement.LocalOfferDirectory{Offers: deps.Responses}
+	handler := &engagementapi.Handler{
+		UseCase:   agreement.NewEngagements(deps.Responses, directory, deps.Agreement),
+		Actor:     httpapp.ActorID,
+		RequestID: httpapp.RequestID,
+		Logger:    logger,
+	}
+	handler.Register(mux)
 }
