@@ -38,14 +38,13 @@ func PaginateOffers(
 	limit int,
 	offset int,
 ) []domain.Offer {
+
 	if offset >= len(offers) {
 		return []domain.Offer{}
 	}
-
-	end := offset + limit
-
-	if end > len(offers) {
-		end = len(offers)
+	end := len(offers)
+	if limit < len(offers)-offset {
+		end = offset + limit
 	}
 
 	return offers[offset:end]

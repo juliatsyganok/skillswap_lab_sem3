@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+
 	"skillswap/domain"
 )
 
@@ -16,10 +18,9 @@ type OfferSearcher interface {
 	) ([]domain.Offer, error)
 }
 
-// ActorFunc получает ID пользователя из контекста.
-// Конкретная реализация предоставляется middleware.
 type ActorFunc func(context.Context) (string, bool)
 
+// OffersHandler обрабатывает HTTP-запросы поиска.
 type OffersHandler struct {
 	searcher OfferSearcher
 	actor    ActorFunc
@@ -42,6 +43,7 @@ func writeJSON(
 ) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+
 	_ = json.NewEncoder(w).Encode(value)
 }
 
@@ -57,11 +59,37 @@ func writeError(
 	})
 }
 
+func hasRequestBody(r *http.Request) (bool, error) {
+	if r.Body == nil {
+		return false, nil
+	}
+
+	var buf [1]byte
+
+	n, err := r.Body.Read(buf[:])
+
+	if err != nil && err != io.EOF {
+		return false, err
+	}
+
+	return n > 0, nil
+}
 func (h *OffersHandler) GetOffers(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	if r.URL.Path != "/v1/offers" {
+		writeError(
+			w,
+			http.StatusNotFound,
+			"not_found",
+			"Маршрут не найден",
+		)
+		return
+	}
 	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+
 		writeError(
 			w,
 			http.StatusMethodNotAllowed,
@@ -70,9 +98,9 @@ func (h *OffersHandler) GetOffers(
 		)
 		return
 	}
+	hasBody, bodyErr := hasRequestBody(r)
 
-	// Для этого GET не принимаем тело запроса.
-	if r.ContentLength != 0 {
+	if bodyErr != nil || hasBody {
 		writeError(
 			w,
 			http.StatusBadRequest,
@@ -83,6 +111,7 @@ func (h *OffersHandler) GetOffers(
 	}
 
 	query, err := ParseOffersQuery(r.URL.Query())
+
 	if err != nil {
 		writeError(
 			w,
@@ -92,7 +121,6 @@ func (h *OffersHandler) GetOffers(
 		)
 		return
 	}
-
 	if h.actor == nil || h.searcher == nil {
 		writeError(
 			w,
@@ -104,6 +132,7 @@ func (h *OffersHandler) GetOffers(
 	}
 
 	actorID, ok := h.actor(r.Context())
+
 	if !ok || actorID == "" {
 		writeError(
 			w,
@@ -119,6 +148,7 @@ func (h *OffersHandler) GetOffers(
 		actorID,
 		query.Skill,
 	)
+
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrNotFound):
@@ -126,8 +156,17 @@ func (h *OffersHandler) GetOffers(
 				w,
 				http.StatusNotFound,
 				"not_found",
-				"Обязательный объект не найден",
+				"Пользователь не найден",
 			)
+
+		case errors.Is(err, domain.ErrStorageUnavailable):
+			writeError(
+				w,
+				http.StatusServiceUnavailable,
+				"storage_unavailable",
+				"Хранилище временно недоступно",
+			)
+
 		default:
 			writeError(
 				w,
@@ -136,24 +175,26 @@ func (h *OffersHandler) GetOffers(
 				"Ошибка поиска предложений",
 			)
 		}
+
 		return
 	}
-
 	page := PaginateOffers(
 		offers,
 		query.Limit,
 		query.Offset,
 	)
-
 	items := make([]OfferDTO, 0, len(page))
 
 	for _, offer := range page {
 		items = append(items, ToOfferDTO(offer))
 	}
-
-	writeJSON(w, http.StatusOK, OffersResponse{
-		Items:  items,
-		Limit:  query.Limit,
-		Offset: query.Offset,
-	})
+	writeJSON(
+		w,
+		http.StatusOK,
+		OffersResponse{
+			Items:  items,
+			Limit:  query.Limit,
+			Offset: query.Offset,
+		},
+	)
 }
