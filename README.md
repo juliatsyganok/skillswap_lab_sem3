@@ -16,3 +16,108 @@ go run ./cmd/demo
 ## Сценарий demo
 
 Сначала отклик pending у обеих сторон. Подтверждение переводит его в accepted и оставляет одну запись. Повторное подтверждение — no-op с одной записью. Чтение возвращает accepted.
+
+## ЛР3. Запуск и интеграция (D)
+
+```bash
+go run ./cmd/api
+curl -i http://127.0.0.1:8080/healthz
+```
+
+`GET /healthz` возвращает `200 OK` и сгенерированный сервером `X-Request-ID`.
+Бизнес-маршруты подключаются через функцию регистрации в `cmd/api/main.go`.
+Для них middleware принимает ровно один `X-Demo-User` с ID длиной 1–64 символа.
+Первый символ — латинская буква или цифра. Далее также допустимы `_` и `-`.
+При отсутствующем или неверном заголовке возвращается `400` с кодом
+`invalid_demo_user` до маршрутизации. С корректным заголовком неизвестный
+путь или метод получает стандартный ответ `ServeMux` (404 или 405).
+Заголовок задаёт учебного пользователя. Любой клиент может его подставить,
+поэтому права на действие проверяет use case.
+
+Данные создаются при запуске. Ученик `learner` предлагает Python и ищет Go.
+`author` и `mentor` предлагают Go и ищут Python. Из пяти активных предложений
+`offer-1` принадлежит `author`, остальные принадлежат `mentor`. Отклик
+`response-1` от `learner` на `offer-1` начинается в `pending`. Перезапуск
+сбрасывает память к этим фикстурам. Гарантия атомарности действует между
+запросами к одному процессу.
+
+### Локальная конфигурация
+
+| Переменная | По умолчанию | Назначение |
+| --- | --- | --- |
+| `SKILLSWAP_ADDR` | `127.0.0.1:8080` | Адрес приложения |
+| `SKILLSWAP_UPSTREAM_URL` | `http://127.0.0.1:8081` | Базовый URL зависимости C |
+| `SKILLSWAP_COMMAND_TIMEOUT` | `2s` | Общий бюджет обработки запроса, передаётся через context |
+| `SKILLSWAP_UPSTREAM_TIMEOUT` | `3s` | Предел одного запроса клиента зависимости, включая чтение тела |
+| `SKILLSWAP_UPSTREAM_DIAL_TIMEOUT` | `500ms` | Предел соединения и TLS handshake |
+| `SKILLSWAP_UPSTREAM_RESPONSE_HEADER_TIMEOUT` | `3s` | Ожидание заголовков ответа зависимости |
+| `SKILLSWAP_UPSTREAM_MAX_BODY` | `65536` | Лимит байт ответа, передаётся адаптеру C |
+| `SKILLSWAP_READ_HEADER_TIMEOUT` | `2s` | Предел чтения заголовков входящего запроса |
+| `SKILLSWAP_MAX_HEADER_BYTES` | `16384` | Лимит входящих заголовков в байтах |
+| `SKILLSWAP_IDLE_TIMEOUT` | `30s` | Предел простоя keep-alive соединения |
+| `SKILLSWAP_SHUTDOWN_TIMEOUT` | `5s` | Время ожидания активных запросов при остановке |
+
+`SIGINT` или `SIGTERM` закрывает listener и запускает ожидание активных
+запросов. По истечении срока процесс закрывает оставшиеся соединения,
+пишет ошибку в журнал и выходит с кодом 1. Журнал JSON содержит ID, метод,
+шаблон маршрута, статус и длительность. Для запроса без совпадения
+пишется `unmatched`.
+
+### Стыки с A, B и C
+
+- **A.** В callback `httpapp.NewServer` зарегистрировать команду и GET
+  результата. Actor доступен через `httpapp.ActorID(r.Context())`. После
+  проверки зависимости вызвать
+  `deps.Agreement.AcceptContext(r.Context(), actor, responseID)`. Результат
+  содержит отклик, `changed` и ошибку. `changed=true` только у вызова,
+  который сохранил переход. GET читает `deps.Responses.GetResponse`.
+- **B.** В том же callback зарегистрировать выдачу. Профили доступны через
+  `deps.Profiles`, поиск через `deps.Discovery` и `deps.Matching`. Поиск и
+  команда работают на одном экземпляре хранилища.
+- **C.** Адаптер получает `deps.Config.UpstreamURL`, общий
+  `deps.HTTPClient` и `deps.Config.UpstreamMaxBody`. Клиент возвращает
+  3xx адаптеру без редиректа. Передавать `r.Context()` через весь вызов
+  зависимости. Сетевой вызов заканчивается до атомарной записи.
+
+`agreement.Store` теперь требует `UpdateResponse` и `UpdateOffer`. Другие
+реализации этого интерфейса должны выполнить чтение, решение и запись под
+общей для экземпляра store блокировкой. Вызовы ЛР2 `Accept`, `Reject` и
+`SetOfferStatus` продолжают работать через эту границу.
+
+### Проверки D
+
+```bash
+go test -v ./internal/agreement -run 'TestConcurrentAcceptOnSharedStore|TestAcceptCanceledLeavesResponsePending'
+go test -v ./internal/httpapp -run 'TestServe'
+go test -race ./...
+```
+
+Конкурентный тест выполняет 32 вызова через два сервиса с одним store.
+Ожидается ровно один `changed=true` и один сохранённый отклик `accepted`.
+Во временной копии разрыв блокировки между чтением и решением привёл
+к 32 переходам вместо одного даже под `-race`. После восстановления
+атомарной границы тест снова прошёл.
+
+Тесты остановки запускают настоящий HTTP-сервер и удерживают запрос
+до начала shutdown. В штатном случае ответ приходит с `204`. При
+превышении grace period соединение закрывается и контекст запроса отменяется.
+
+## ЛР3. Команда и состояние (A)
+
+Маршруты, DTO и таблица ошибок — в [api-contract.md](api-contract.md).
+
+| Маршрут | Use case | Прежнее правило / новая часть | Автор |
+| --- | --- | --- | --- |
+| `PUT /v1/engagements/{id}/acceptance` | `agreement.Engagements.Accept` → `Service.AcceptContext` | ЛР2 `Decide` (права автора, переход, no-op повтора); новое — вызов справочника до перехода, `changed` | A |
+| `GET /v1/engagements/{id}` | `agreement.Engagements.Get` | Новое: чтение общего store, доступ только участникам | A |
+
+```bash
+go run ./cmd/api
+./requests/engagements.sh
+go test -v ./internal/engagementapi ./cmd/api
+```
+
+Справочник предложений пока локальный (`agreement.LocalOfferDirectory`);
+HTTP-клиент C подключается в `registerEngagements` в `cmd/api/main.go`.
+В `httpapp.Dependencies.Responses` теперь требуется также `GetOffer`
+(тип `agreement.EngagementReader`).
