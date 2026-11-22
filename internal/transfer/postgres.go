@@ -155,7 +155,7 @@ func (r *PostgresRepository) Transfer(ctx context.Context, c Command) (Result, e
 			return Result{}, classify(err)
 		}
 	}
-	
+
 	for _, target := range []struct{ slot, owner string }{{p.InitiatorSlotID, a.InitiatorID}, {p.PartnerSlotID, a.PartnerID}} {
 		var owner string
 		if err = tx.QueryRowContext(ctx, `SELECT owner_id FROM slots WHERE id=$1`, target.slot).Scan(&owner); err != nil {
