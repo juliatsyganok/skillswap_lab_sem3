@@ -1,7 +1,7 @@
 package agreement
 
 import (
-	"fmt"
+	"context"
 
 	"skillswap/domain"
 )
@@ -15,54 +15,35 @@ func NewService(store Store) *Service {
 }
 
 func (s *Service) Accept(actorID, responseID string) (domain.Response, error) {
-	return s.decide(actorID, responseID, domain.ResponseAccepted)
+	response, _, err := s.AcceptContext(context.Background(), actorID, responseID)
+	return response, err
+}
+
+// AcceptContext commits the local transition. changed is true only if a status
+// was persisted. Call external dependencies before entering this operation.
+func (s *Service) AcceptContext(ctx context.Context, actorID, responseID string) (response domain.Response, changed bool, err error) {
+	return s.decide(ctx, actorID, responseID, domain.ResponseAccepted)
 }
 
 func (s *Service) Reject(actorID, responseID string) (domain.Response, error) {
-	return s.decide(actorID, responseID, domain.ResponseRejected)
+	response, _, err := s.decide(context.Background(), actorID, responseID, domain.ResponseRejected)
+	return response, err
 }
 
-func (s *Service) decide(actorID, responseID string, decision domain.ResponseStatus) (domain.Response, error) {
-	resp, err := s.store.GetResponse(responseID)
-	if err != nil {
-		return domain.Response{}, fmt.Errorf("get response: %w", err)
-	}
-
-	offer, err := s.store.GetOffer(resp.OfferID)
-	if err != nil {
-		return domain.Response{}, fmt.Errorf("get offer: %w", err)
-	}
-	if resp.Status == decision {
-		check := resp
-		check.Status = domain.ResponsePending
-		if _, err := Decide(actorID, offer, check, decision); err != nil {
-			return domain.Response{}, err
+func (s *Service) decide(ctx context.Context, actorID, responseID string, decision domain.ResponseStatus) (domain.Response, bool, error) {
+	return s.store.UpdateResponse(ctx, responseID, func(offer domain.Offer, resp domain.Response) (domain.ResponseStatus, error) {
+		// Preserve the service's LR2 repeat behavior and recheck permissions.
+		if resp.Status == domain.ResponseRejected && decision == domain.ResponseRejected {
+			resp.Status = domain.ResponsePending
 		}
-		return resp, nil
-	}
-	updated, err := Decide(actorID, offer, resp, decision)
-	if err != nil {
-		return domain.Response{}, err
-	}
-
-	if err := s.store.SaveResponse(updated); err != nil {
-		return domain.Response{}, fmt.Errorf("save response: %w", err)
-	}
-
-	return updated, nil
+		updated, err := Decide(actorID, offer, resp, decision)
+		return updated.Status, err
+	})
 }
 
 func (s *Service) SetOfferStatus(actorID, offerID string, next domain.OfferStatus) (domain.Offer, error) {
-	offer, err := s.store.GetOffer(offerID)
-	if err != nil {
-		return domain.Offer{}, fmt.Errorf("get offer: %w", err)
-	}
-	updated, err := ChangeOfferStatus(actorID, offer, next)
-	if err != nil {
-		return domain.Offer{}, err
-	}
-	if err := s.store.SaveOffer(updated); err != nil {
-		return domain.Offer{}, fmt.Errorf("save offer: %w", err)
-	}
-	return updated, nil
+	return s.store.UpdateOffer(offerID, func(offer domain.Offer) (domain.OfferStatus, error) {
+		updated, err := ChangeOfferStatus(actorID, offer, next)
+		return updated.Status, err
+	})
 }
