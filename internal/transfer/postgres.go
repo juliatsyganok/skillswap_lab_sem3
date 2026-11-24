@@ -18,6 +18,9 @@ func classify(err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %w", ErrRetryable, err)
+	}
 	var pg *pgconn.PgError
 	if errors.As(err, &pg) {
 		switch pg.Code {
@@ -49,7 +52,7 @@ func sameCommand(s StoredCommand, c Command) bool {
 	return s.AgreementID == c.AgreementID && s.ProposalID == c.ProposalID && s.ActorID == c.ActorID && s.ExpectedRevision == c.ExpectedRevision
 }
 func storedResult(s StoredCommand) Result {
-	return Result{s.AgreementID, "active", s.ResultRevision, s.InitiatorSlotID, s.PartnerSlotID, s.CommandID}
+	return Result{AgreementID: s.AgreementID, Status: "active", Revision: s.ResultRevision, InitiatorSlotID: s.InitiatorSlotID, PartnerSlotID: s.PartnerSlotID, CommandID: s.CommandID}
 }
 
 func (r *PostgresRepository) Transfer(ctx context.Context, c Command) (Result, error) {
@@ -59,17 +62,9 @@ func (r *PostgresRepository) Transfer(ctx context.Context, c Command) (Result, e
 	}
 	defer tx.Rollback()
 
-	var a Agreement
-	err = tx.QueryRowContext(ctx, `SELECT id,initiator_id,partner_id,status,revision FROM agreements WHERE id=$1 FOR UPDATE`, c.AgreementID).
-		Scan(&a.ID, &a.InitiatorID, &a.PartnerID, &a.Status, &a.Revision)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Result{}, ErrNotFound
-	}
+	a, err := lockAgreement(ctx, tx, c.AgreementID, c.ActorID)
 	if err != nil {
-		return Result{}, classify(err)
-	}
-	if !permitted(a, c.ActorID) {
-		return Result{}, ErrForbidden
+		return Result{}, err
 	}
 
 	previous, err := loadStored(ctx, tx, c.CommandID)
@@ -112,27 +107,9 @@ func (r *PostgresRepository) Transfer(ctx context.Context, c Command) (Result, e
 		return Result{}, ErrInvalidRequest
 	}
 
-	rows, err := tx.QueryContext(ctx, `SELECT r.slot_id,r.participant_id FROM reservations r WHERE r.agreement_id=$1`, a.ID)
+	old, err := currentReservations(ctx, tx, a)
 	if err != nil {
-		return Result{}, classify(err)
-	}
-	old := map[string]string{}
-	for rows.Next() {
-		var slot, participant string
-		if err = rows.Scan(&slot, &participant); err != nil {
-			break
-		}
-		old[participant] = slot
-	}
-	if err == nil {
-		err = rows.Err()
-	}
-	rows.Close()
-	if err != nil {
-		return Result{}, classify(err)
-	}
-	if len(old) != 2 || old[a.InitiatorID] == "" || old[a.PartnerID] == "" {
-		return Result{}, ErrInvariant
+		return Result{}, err
 	}
 	if old[a.InitiatorID] == p.InitiatorSlotID && old[a.PartnerID] == p.PartnerSlotID {
 		return Result{}, ErrSameSlots
@@ -140,20 +117,8 @@ func (r *PostgresRepository) Transfer(ctx context.Context, c Command) (Result, e
 	if old[a.InitiatorID] == p.InitiatorSlotID || old[a.PartnerID] == p.PartnerSlotID || old[a.InitiatorID] == p.PartnerSlotID || old[a.PartnerID] == p.InitiatorSlotID {
 		return Result{}, ErrPartialOverlap
 	}
-	ids := []string{old[a.InitiatorID], old[a.PartnerID], p.InitiatorSlotID, p.PartnerSlotID}
-	sort.Strings(ids)
-	for i, id := range ids {
-		if i > 0 && id == ids[i-1] {
-			continue
-		}
-		var locked string
-		err = tx.QueryRowContext(ctx, `SELECT id FROM slots WHERE id=$1 FOR UPDATE`, id).Scan(&locked)
-		if errors.Is(err, sql.ErrNoRows) {
-			return Result{}, ErrNotFound
-		}
-		if err != nil {
-			return Result{}, classify(err)
-		}
+	if err := lockSlots(ctx, tx, old[a.InitiatorID], old[a.PartnerID], p.InitiatorSlotID, p.PartnerSlotID); err != nil {
+		return Result{}, err
 	}
 
 	for _, target := range []struct{ slot, owner string }{{p.InitiatorSlotID, a.InitiatorID}, {p.PartnerSlotID, a.PartnerID}} {
@@ -174,16 +139,8 @@ func (r *PostgresRepository) Transfer(ctx context.Context, c Command) (Result, e
 		}
 	}
 
-	res, err := tx.ExecContext(ctx, `DELETE FROM reservations WHERE agreement_id=$1`, a.ID)
-	if err != nil {
-		return Result{}, classify(err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
+	if err := releaseReservations(ctx, tx, a.ID); err != nil {
 		return Result{}, err
-	}
-	if n != 2 {
-		return Result{}, ErrInvariant
 	}
 	for _, target := range []struct{ slot, owner string }{{p.InitiatorSlotID, a.InitiatorID}, {p.PartnerSlotID, a.PartnerID}} {
 		_, err = tx.ExecContext(ctx, `INSERT INTO reservations(slot_id,agreement_id,participant_id) VALUES($1,$2,$3)`, target.slot, a.ID, target.owner)
@@ -191,11 +148,11 @@ func (r *PostgresRepository) Transfer(ctx context.Context, c Command) (Result, e
 			return Result{}, classify(err)
 		}
 	}
-	res, err = tx.ExecContext(ctx, `UPDATE agreements SET revision=revision+1,updated_at=now() WHERE id=$1 AND revision=$2 AND status='active'`, a.ID, a.Revision)
+	res, err := tx.ExecContext(ctx, `UPDATE agreements SET revision=revision+1,updated_at=now() WHERE id=$1 AND revision=$2 AND status='active'`, a.ID, a.Revision)
 	if err != nil {
 		return Result{}, classify(err)
 	}
-	n, err = res.RowsAffected()
+	n, err := res.RowsAffected()
 	if err != nil {
 		return Result{}, err
 	}
@@ -213,12 +170,25 @@ func (r *PostgresRepository) Transfer(ctx context.Context, c Command) (Result, e
 	if err = tx.Commit(); err != nil {
 		return Result{}, fmt.Errorf("%w: %v", ErrCommitUnconfirmed, err)
 	}
-	return Result{a.ID, "active", a.Revision + 1, p.InitiatorSlotID, p.PartnerSlotID, c.CommandID}, nil
+	return Result{AgreementID: a.ID, Status: "active", Revision: a.Revision + 1, InitiatorSlotID: p.InitiatorSlotID, PartnerSlotID: p.PartnerSlotID, CommandID: c.CommandID}, nil
 }
 
 func (r *PostgresRepository) GetAgreement(ctx context.Context, id, actor string) (Result, error) {
 	var a Agreement
-	err := r.DB.QueryRowContext(ctx, `SELECT id,initiator_id,partner_id,status,revision FROM agreements WHERE id=$1`, id).Scan(&a.ID, &a.InitiatorID, &a.PartnerID, &a.Status, &a.Revision)
+	var result Result
+	var summary sql.NullString
+	var rating sql.NullInt64
+	var count int
+	// One statement reads matching status, result and reservations from the same snapshot.
+	err := r.DB.QueryRowContext(ctx, `
+SELECT a.id, a.initiator_id, a.partner_id, a.status, a.revision, a.result_summary, a.result_rating,
+       count(r.slot_id),
+       coalesce(max(r.slot_id) FILTER (WHERE r.participant_id = a.initiator_id), ''),
+       coalesce(max(r.slot_id) FILTER (WHERE r.participant_id = a.partner_id), '')
+FROM agreements a LEFT JOIN reservations r ON r.agreement_id = a.id
+WHERE a.id = $1 GROUP BY a.id`, id).Scan(
+		&a.ID, &a.InitiatorID, &a.PartnerID, &a.Status, &a.Revision, &summary, &rating,
+		&count, &result.InitiatorSlotID, &result.PartnerSlotID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Result{}, ErrNotFound
 	}
@@ -228,35 +198,15 @@ func (r *PostgresRepository) GetAgreement(ctx context.Context, id, actor string)
 	if !permitted(a, actor) {
 		return Result{}, ErrForbidden
 	}
-	result := Result{AgreementID: a.ID, Status: a.Status, Revision: a.Revision}
-	rows, err := r.DB.QueryContext(ctx, `SELECT r.participant_id,r.slot_id FROM reservations r WHERE r.agreement_id=$1`, id)
-	if err != nil {
-		return Result{}, classify(err)
-	}
-	defer rows.Close()
-	count := 0
-	for rows.Next() {
-		var owner, slot string
-		if err = rows.Scan(&owner, &slot); err != nil {
-			return Result{}, err
-		}
-		count++
-		if owner == a.InitiatorID {
-			result.InitiatorSlotID = slot
-		} else if owner == a.PartnerID {
-			result.PartnerSlotID = slot
-		} else {
-			return Result{}, ErrInvariant
-		}
-	}
-	if err = rows.Err(); err != nil {
-		return Result{}, err
-	}
 	if a.Status == "active" && (count != 2 || result.InitiatorSlotID == "" || result.PartnerSlotID == "") {
 		return Result{}, ErrInvariant
 	}
 	if a.Status != "active" && count != 0 {
 		return Result{}, ErrInvariant
+	}
+	result.AgreementID, result.Status, result.Revision = a.ID, a.Status, a.Revision
+	if a.Status == "completed" {
+		result.Completion = &Completion{Summary: summary.String, Rating: int(rating.Int64)}
 	}
 	return result, nil
 }
@@ -278,4 +228,82 @@ func (r *PostgresRepository) GetCommand(ctx context.Context, id, actor string) (
 		return Result{}, ErrForbidden
 	}
 	return storedResult(s), nil
+}
+
+// Writers lock the agreement before reading reservations and then lock the
+// affected slots in ID order. Transfer also locks its proposal before slots.
+func lockAgreement(ctx context.Context, tx *sql.Tx, id, actor string) (Agreement, error) {
+	var a Agreement
+	err := tx.QueryRowContext(ctx, `SELECT id,initiator_id,partner_id,status,revision FROM agreements WHERE id=$1 FOR UPDATE`, id).
+		Scan(&a.ID, &a.InitiatorID, &a.PartnerID, &a.Status, &a.Revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Agreement{}, ErrNotFound
+	}
+	if err != nil {
+		return Agreement{}, classify(err)
+	}
+	if !permitted(a, actor) {
+		return Agreement{}, ErrForbidden
+	}
+	return a, nil
+}
+
+func currentReservations(ctx context.Context, tx *sql.Tx, a Agreement) (map[string]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT r.slot_id,r.participant_id FROM reservations r WHERE r.agreement_id=$1`, a.ID)
+	if err != nil {
+		return nil, classify(err)
+	}
+	old := map[string]string{}
+	for rows.Next() {
+		var slot, participant string
+		if err = rows.Scan(&slot, &participant); err != nil {
+			break
+		}
+		old[participant] = slot
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	if err != nil {
+		return nil, classify(err)
+	}
+	if len(old) != 2 || old[a.InitiatorID] == "" || old[a.PartnerID] == "" {
+		return nil, ErrInvariant
+	}
+	return old, nil
+}
+
+func lockSlots(ctx context.Context, tx *sql.Tx, ids ...string) error {
+	sort.Strings(ids)
+	for i, id := range ids {
+		if i > 0 && id == ids[i-1] {
+			continue
+		}
+		var locked string
+		err := tx.QueryRowContext(ctx, `SELECT id FROM slots WHERE id=$1 FOR UPDATE`, id).Scan(&locked)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return classify(err)
+		}
+	}
+
+	return nil
+}
+
+func releaseReservations(ctx context.Context, tx *sql.Tx, id string) error {
+	res, err := tx.ExecContext(ctx, `DELETE FROM reservations WHERE agreement_id=$1`, id)
+	if err != nil {
+		return classify(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 2 {
+		return ErrInvariant
+	}
+	return nil
 }

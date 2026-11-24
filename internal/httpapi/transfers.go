@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -12,15 +13,17 @@ import (
 )
 
 type TransferService interface {
+	Complete(context.Context, transfer.CompletionCommand) (transfer.CompletionResult, error)
 	Transfer(context.Context, transfer.Command) (transfer.Result, error)
 	GetAgreement(context.Context, string, string) (transfer.Result, error)
 	GetCommand(context.Context, string, string) (transfer.Result, error)
 }
 
 type TransferHandler struct {
-	Service TransferService
-	Actor   func(context.Context) (string, bool)
-	Timeout time.Duration
+	Service  TransferService
+	Actor    func(context.Context) (string, bool)
+	Timeout  time.Duration
+	LogError func(context.Context, error)
 }
 
 func NewTransferHandler(s TransferService, actor func(context.Context) (string, bool)) *TransferHandler {
@@ -28,6 +31,7 @@ func NewTransferHandler(s TransferService, actor func(context.Context) (string, 
 }
 func (h *TransferHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agreements/{id}/transfers", h.transfer)
+	mux.HandleFunc("POST /v1/agreements/{id}/completion", h.complete)
 	mux.HandleFunc("GET /v1/agreements/{id}", h.agreement)
 	mux.HandleFunc("GET /v1/transfer-commands/{command_id}", h.command)
 }
@@ -55,17 +59,8 @@ func (h *TransferHandler) transfer(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
 	var cmd transfer.Command
-	if err := dec.Decode(&cmd); err != nil {
-		writeError(w, 400, "invalid_request", "invalid JSON body")
-		return
-	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		writeError(w, 400, "invalid_request", "expected exactly one JSON object")
+	if !decodeAgreementCommand(w, r, &cmd) {
 		return
 	}
 	cmd.AgreementID = r.PathValue("id")
@@ -74,11 +69,47 @@ func (h *TransferHandler) transfer(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	result, err := h.Service.Transfer(ctx, cmd)
 	if err != nil {
-		transferError(w, err)
+		h.writeOperationError(ctx, w, err)
 		return
 	}
 	writeJSON(w, 200, result)
 }
+func (h *TransferHandler) complete(w http.ResponseWriter, r *http.Request) {
+	actor, ok := h.actor(w, r)
+	if !ok {
+		return
+	}
+	var cmd transfer.CompletionCommand
+	if !decodeAgreementCommand(w, r, &cmd) {
+		return
+	}
+	cmd.AgreementID, cmd.ActorID = r.PathValue("id"), actor
+	ctx, cancel := h.context(r)
+	defer cancel()
+	result, err := h.Service.Complete(ctx, cmd)
+	if err != nil {
+		h.writeOperationError(ctx, w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func decodeAgreementCommand(w http.ResponseWriter, r *http.Request, payload any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(payload); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body")
+		return false
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid_request", "expected exactly one JSON object")
+		return false
+	}
+	return true
+}
+
 func (h *TransferHandler) agreement(w http.ResponseWriter, r *http.Request) {
 	actor, ok := h.actor(w, r)
 	if !ok {
@@ -88,7 +119,7 @@ func (h *TransferHandler) agreement(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	result, err := h.Service.GetAgreement(ctx, r.PathValue("id"), actor)
 	if err != nil {
-		transferError(w, err)
+		h.writeOperationError(ctx, w, err)
 		return
 	}
 	writeJSON(w, 200, result)
@@ -102,15 +133,21 @@ func (h *TransferHandler) command(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	result, err := h.Service.GetCommand(ctx, r.PathValue("command_id"), actor)
 	if err != nil {
-		transferError(w, err)
+		h.writeOperationError(ctx, w, err)
 		return
 	}
 	writeJSON(w, 200, result)
 }
-func transferError(w http.ResponseWriter, err error) {
+func (h *TransferHandler) writeOperationError(ctx context.Context, w http.ResponseWriter, err error) {
+	logError := h.LogError
+	if logError == nil {
+		logError = func(ctx context.Context, err error) {
+			slog.ErrorContext(ctx, "agreement operation failed", "error", err)
+		}
+	}
 	switch {
 	case errors.Is(err, transfer.ErrInvalidRequest):
-		writeError(w, 400, "invalid_request", "invalid transfer request")
+		writeError(w, 400, "invalid_request", "invalid agreement request")
 	case errors.Is(err, transfer.ErrNotFound):
 		writeError(w, 404, "not_found", "resource not found")
 	case errors.Is(err, transfer.ErrForbidden):
@@ -130,12 +167,15 @@ func transferError(w http.ResponseWriter, err error) {
 	case errors.Is(err, transfer.ErrCommandConflict):
 		writeError(w, 409, "command_conflict", "command ID is already used")
 	case errors.Is(err, transfer.ErrInvalidTransition):
-		writeError(w, 409, "invalid_transition", "agreement or proposal is not active")
+		writeError(w, 409, "invalid_transition", "agreement or proposal does not allow the operation")
 	case errors.Is(err, transfer.ErrRetryable):
+		logError(ctx, err)
 		writeError(w, 503, "transaction_retryable", "temporary database conflict")
 	case errors.Is(err, transfer.ErrCommitUnconfirmed):
-		writeError(w, 503, "commit_unconfirmed", "check command status before retrying")
+		logError(ctx, err)
+		writeError(w, 503, "commit_unconfirmed", "check the saved state before retrying")
 	default:
+		logError(ctx, err)
 		writeError(w, 500, "internal_error", "internal server error")
 	}
 }

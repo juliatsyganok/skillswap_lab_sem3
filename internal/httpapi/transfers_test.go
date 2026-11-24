@@ -10,7 +10,15 @@ import (
 	"skillswap/internal/transfer"
 )
 
-type transferStub struct{ called bool }
+type transferStub struct {
+	called     bool
+	completion transfer.CompletionCommand
+}
+
+func (s *transferStub) Complete(_ context.Context, c transfer.CompletionCommand) (transfer.CompletionResult, error) {
+	s.completion = c
+	return transfer.CompletionResult{Changed: true}, nil
+}
 
 func (s *transferStub) Transfer(_ context.Context, c transfer.Command) (transfer.Result, error) {
 	s.called = true
@@ -32,5 +40,31 @@ func TestTransferHTTP(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != 200 || !s.called {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCompletionHTTP(t *testing.T) {
+	s := &transferStub{}
+	h := NewTransferHandler(s, func(context.Context) (string, bool) { return "u1", true })
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	for _, tc := range []struct {
+		body   string
+		status int
+	}{
+		{`{"summary":"done","rating":5} {}`, 400},
+		{`{"summary":"done","rating":5,"actor_id":"u2"}`, 400},
+		{`{"summary":"done","rating":5}`, 200},
+	} {
+		req := httptest.NewRequest("POST", "/v1/agreements/a1/completion", strings.NewReader(tc.body))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != tc.status {
+			t.Fatalf("code=%d want=%d body=%s", rec.Code, tc.status, rec.Body.String())
+		}
+	}
+	if want := (transfer.CompletionCommand{ActorID: "u1", AgreementID: "a1", Summary: "done", Rating: 5}); s.completion != want {
+		t.Fatalf("command = %+v, want %+v", s.completion, want)
 	}
 }

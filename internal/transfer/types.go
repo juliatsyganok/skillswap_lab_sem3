@@ -28,12 +28,13 @@ type Command struct {
 }
 
 type Result struct {
-	AgreementID     string `json:"agreement_id"`
-	Status          string `json:"status"`
-	Revision        int64  `json:"revision"`
-	InitiatorSlotID string `json:"initiator_slot_id"`
-	PartnerSlotID   string `json:"partner_slot_id"`
-	CommandID       string `json:"command_id"`
+	AgreementID     string      `json:"agreement_id"`
+	Status          string      `json:"status"`
+	Revision        int64       `json:"revision"`
+	InitiatorSlotID string      `json:"initiator_slot_id"`
+	PartnerSlotID   string      `json:"partner_slot_id"`
+	CommandID       string      `json:"command_id"`
+	Completion      *Completion `json:"completion,omitempty"`
 }
 
 type Agreement struct {

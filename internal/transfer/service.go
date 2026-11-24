@@ -3,9 +3,11 @@ package transfer
 import (
 	"context"
 	"strings"
+	"unicode/utf8"
 )
 
 type Repository interface {
+	Complete(context.Context, CompletionCommand) (CompletionResult, error)
 	Transfer(ctx context.Context, cmd Command) (Result, error)
 	GetAgreement(ctx context.Context, agreementID, actorID string) (Result, error)
 	GetCommand(ctx context.Context, commandID, actorID string) (Result, error)
@@ -32,4 +34,14 @@ func (s *Service) GetCommand(ctx context.Context, id, actor string) (Result, err
 		return Result{}, ErrInvalidRequest
 	}
 	return s.repo.GetCommand(ctx, id, actor)
+}
+
+func (s *Service) Complete(ctx context.Context, cmd CompletionCommand) (CompletionResult, error) {
+	cmd.Summary = strings.TrimSpace(cmd.Summary)
+	if strings.TrimSpace(cmd.ActorID) == "" || strings.TrimSpace(cmd.AgreementID) == "" ||
+		cmd.Summary == "" || strings.ContainsRune(cmd.Summary, 0) || utf8.RuneCountInString(cmd.Summary) > 1000 ||
+		cmd.Rating < 1 || cmd.Rating > 5 {
+		return CompletionResult{}, ErrInvalidRequest
+	}
+	return s.repo.Complete(ctx, cmd)
 }

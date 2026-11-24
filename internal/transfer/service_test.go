@@ -12,6 +12,10 @@ type stubRepo struct {
 	err    error
 }
 
+func (s *stubRepo) Complete(_ context.Context, _ CompletionCommand) (CompletionResult, error) {
+	return CompletionResult{}, s.err
+}
+
 func (s *stubRepo) Transfer(_ context.Context, _ Command) (Result, error) {
 	s.calls++
 	return s.result, s.err
